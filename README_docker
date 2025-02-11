@@ -1,7 +1,7 @@
-1. Build docker image:
-docker build -t <name> .
+1. Copy Flame assets (flame2023.pkl, FLAME_masks.pkl) to flame_model/assets/flame/
 
-2. Copy Flame assets (flame2023.pkl, FLAME_masks.pkl) to flame_model/assets/flame/
+2. Build docker image:
+docker build -t <name> .
 
 3. Open xhost for docker:
 xhost +local:docker
