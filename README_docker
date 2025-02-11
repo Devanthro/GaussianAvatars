@@ -1,13 +1,13 @@
 1. Copy Flame assets (flame2023.pkl, FLAME_masks.pkl) to flame_model/assets/flame/
 
 2. Build docker image:
-docker build -t <name> .
+docker build -t <image-name> .
 
 3. Open xhost for docker:
 xhost +local:docker
 
 4. Run docker container:
-docker run -it --rm --net=host --shm-size=512m -e DISPLAY=$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix -v ~/Videos:/Videos -w /Videos -i -t --runtime=nvidia --gpus all gaussian-avatars-temp
+docker run -it --rm --net=host --shm-size=512m -e DISPLAY=$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix -v ~/Videos:/Videos -w /Videos -i -t --runtime=nvidia --gpus all <image-name>
 
 5. install environment requirements:
 cd ../GaussianAvatars
