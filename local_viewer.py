@@ -34,7 +34,8 @@ from gaussian_renderer import GaussianModel, FlameGaussianModel
 from gaussian_renderer import render
 from mesh_renderer import NVDiffRenderer
 
-from ros2_blendshape_node import main as ros2_main
+import rclpy
+from ros2_blendshape_node import ROS2Subscriber, OVR_ARKIT_BLENDSHAPES_MAP #main as ros2_main
 import threading
 
 import logging
@@ -267,21 +268,28 @@ class LocalViewer(Mini3DViewer):
         self.expr_enabled = False
         self.create_blendshape_sliders()
 
+        self.splatting_visible = False
+
         self.eyes_data = None
+        self.avatar_path = None
 
         self.need_update = False
+
+        rclpy.init()
+        self.subscriber = ROS2Subscriber(self)
+
         # ros2_thread = threading.Thread(target=ros2_main, args=(self,))
-        # # time.sleep(3)
+        # # # time.sleep(3)
         # ros2_thread.start()
 
-        # Use a more controlled approach:
-        from concurrent.futures import ThreadPoolExecutor
+        # # Use a more controlled approach:
+        # from concurrent.futures import ThreadPoolExecutor
         
-        # Create a dedicated executor for ROS2
-        self.ros2_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ros2-worker")
+        # # Create a dedicated executor for ROS2
+        # self.ros2_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ros2-worker")
         
-        # Submit the ROS2 task to the executor
-        self.ros2_future = self.ros2_executor.submit(ros2_main, self)
+        # # Submit the ROS2 task to the executor
+        # self.ros2_future = self.ros2_executor.submit(ros2_main, self)
 
         # self.start_random_animation()
 
@@ -348,6 +356,9 @@ class LocalViewer(Mini3DViewer):
             self.gpu_monitor.stop()
         torch.cuda.empty_cache()
 
+        self.subscriber.destroy_node()
+        rclpy.shutdown()
+
     
         
     def toggle_splatting(self, value=None):
@@ -363,6 +374,8 @@ class LocalViewer(Mini3DViewer):
             dpg.set_value("_checkbox_show_splatting", not current_value)
         else:
             dpg.set_value("_checkbox_show_splatting", value)
+        self.splatting_visible = dpg.get_value("_checkbox_show_splatting")
+        print(f"Changed splatting visibilty to {self.splatting_visible}")
         self.need_update = True
 
     def animate_random_blendshapes(self, duration=5.0, intensity_range=(0.0, 0.7), transition_speed=0.1, 
@@ -477,7 +490,8 @@ class LocalViewer(Mini3DViewer):
                             pass
                     
                     # Update the FLAME model with new values
-                    self.update_flame_model()
+                    # self.update_flame_model()
+                    self.need_update = True
                     
                     # Allow UI to remain responsive
                     time.sleep(0.01)
@@ -566,14 +580,17 @@ class LocalViewer(Mini3DViewer):
                         )
 
     def update_blendshapes_from_ros(self, blendshape_data):
-        for name, value in blendshape_data.items():
-            if name in self.blendshape_values:
-                self.blendshape_values[name] = value
-                try:
-                    dpg.set_value(f"_slider_{name}", value)
-                except Exception as e:
-                    print(f"Error setting value for {name}: {e}")
-        self.update_flame_model()  # Ensure the FLAME model is updated
+        with self.threading_lock:
+            for name, value in blendshape_data.items():
+                if name in self.blendshape_values:
+                    self.blendshape_values[name] = value
+                    try:
+                        dpg.set_value(f"_slider_{name}", value)
+                    except Exception as e:
+                        print(f"Error setting value for {name}: {e}")
+            # self.update_flame_model()  # Ensure the FLAME model is updated
+            self.need_update = True
+            
 
     def update_eyes_from_ros(self, eyes_data):
         try:
@@ -595,7 +612,7 @@ class LocalViewer(Mini3DViewer):
             # if not dpg.get_value("_checkbox_enable_control"):
             #     dpg.set_value("_checkbox_enable_control", True)
             # self.gaussians.update_mesh_by_param_dict(self.flame_param)
-            # self.need_update = True
+            self.need_update = True
             
         except Exception as e:
             print(f"Failed to set eye values: {e}")
@@ -608,9 +625,12 @@ class LocalViewer(Mini3DViewer):
                 blendshapes = np.array([self.blendshape_values[name] for name in ARKit_BLENDSHAPE_NAMES])
                 expressions, jaw = self.gaussians.flame_model.mask.convert_blendshapes_to_expressions(blendshapes)
                 self.flame_param['expr'] = expressions.unsqueeze(0)  # Add batch dimension
-                for i in range(len(jaw)): self.flame_param['jaw'][0, i] = jaw[i]
+                for i in range(len(jaw)): 
+                    self.flame_param['jaw'][0, i] = jaw[i]
+                    if i==0:
+                        self.flame_param['jaw'][0, i] += 0.03 
 
-                self.flame_param['neck'][0, 0] = 0.2 # Neck pitch a bit down for a more natural look
+                self.flame_param['neck'][0, 0] = 0.1 # Neck pitch a bit down for a more natural look
 
                 if self.eyes_data is not None:
                     self.flame_param['eyes'][0, 0] = self.eyes_data[1]  # First eye
@@ -622,9 +642,10 @@ class LocalViewer(Mini3DViewer):
                     dpg.set_value("_checkbox_enable_control", True)
 
 
-                torch.cuda.synchronize()
+                # torch.cuda.synchronize()
+                # torch.cuda.empty_cache()
                 self.gaussians.update_mesh_by_param_dict(self.flame_param)
-                torch.cuda.synchronize()
+                # torch.cuda.synchronize()
                 # self.gaussians.update_mesh_by_param_dict(self.flame_param)
 
 
@@ -641,7 +662,9 @@ class LocalViewer(Mini3DViewer):
         # Update stored value
         self.blendshape_values[blendshape_name] = blendshape_value
 
-        self.update_flame_model()
+        self.need_update = True
+
+        # self.update_flame_model()
         
         # # Convert blendshapes to array in correct order
         # blendshapes = np.array([self.blendshape_values[name] for name in ARKit_BLENDSHAPE_NAMES])
@@ -664,7 +687,8 @@ class LocalViewer(Mini3DViewer):
         for name in ARKit_BLENDSHAPE_NAMES:
             dpg.set_value(f"_slider_{name}", 0.0)
             self.blendshape_values[name] = 0.0
-        self.update_flame_model()
+        self.need_update = True
+        # self.update_flame_model()
 
         # """Reset all blendshape values to 0"""
         # # Reset all sliders in UI
@@ -705,6 +729,9 @@ class LocalViewer(Mini3DViewer):
         Args:
             folder_path (Path): Path to the folder containing the avatar files
         """
+        if folder_path is None or folder_path == "":
+            print("No folder path provided. Cannot load avatar.")
+            return
         # Find ply and motion files in the folder
         folder_path = Path(folder_path)
         ply_files = list(folder_path.glob("*.ply"))
@@ -717,6 +744,12 @@ class LocalViewer(Mini3DViewer):
         if motion_files:
             motion_path = motion_files[0]
         
+        if self.cfg.point_path == point_path and self.cfg.motion_path == motion_path:
+            # print("Avatar already loaded.")
+            return
+        
+        self.unload_avatar()
+        print("Loading avatar from", folder_path)
         # Update config paths
         self.cfg.point_path = point_path
         self.cfg.motion_path = motion_path
@@ -987,7 +1020,8 @@ class LocalViewer(Mini3DViewer):
                 # show splatting
                 def callback_show_splatting(sender, app_data):
                     self.need_update = True
-                dpg.add_checkbox(label="show splatting", default_value=True, callback=callback_show_splatting, tag="_checkbox_show_splatting")
+                dpg.add_checkbox(label="show splatting", default_value=False, callback=callback_show_splatting, tag="_checkbox_show_splatting")
+                self.splatting_visible = dpg.get_value("_checkbox_show_splatting")
 
                 dpg.add_spacer(width=10)
 
@@ -1035,7 +1069,7 @@ class LocalViewer(Mini3DViewer):
             # scaling_modifier slider
             def callback_set_scaling_modifier(sender, app_data):
                 self.need_update = True
-            dpg.add_slider_float(label="Scale modifier", min_value=0, max_value=2, format="%.2f", width=200, default_value=1, callback=callback_set_scaling_modifier, tag="_slider_scaling_modifier")
+            dpg.add_slider_float(label="Scale modifier", min_value=0, max_value=2, format="%.2f", width=200, default_value=1.0, callback=callback_set_scaling_modifier, tag="_slider_scaling_modifier")
 
             # fov slider
             def callback_set_fovy(sender, app_data):
@@ -1315,15 +1349,29 @@ class LocalViewer(Mini3DViewer):
     def run(self):
         try:
             print("Running LocalViewer...")
-            target_fps = 10
+            target_fps = 30
             frame_time = 1.0 / target_fps  # Time per frame in seconds
             last_frame_time = time.time()
 
             while dpg.is_dearpygui_running():
                 try:
+                    
 
                     current_time = time.time()
                     elapsed = current_time - last_frame_time
+
+                    if rclpy.ok():
+                        rclpy.spin_once(self.subscriber, timeout_sec=0)
+                        if self.subscriber.eyes_data is not None:
+                            self.update_eyes_from_ros(self.subscriber.eyes_data)
+                        if self.subscriber.blendshape_data is not None:
+                            self.update_blendshapes_from_ros(self.subscriber.blendshape_data)
+                        splatting_visible_cur = dpg.get_value("_checkbox_show_splatting")
+                        if splatting_visible_cur != self.splatting_visible:
+                            self.toggle_splatting(self.splatting_visible)
+                        if self.avatar_path != self.cfg.point_path and self.avatar_path is not None and self.avatar_path != "":
+                            self.load_avatar(self.avatar_path)
+                        
               
 
                     if self.need_update or self.playing:
@@ -1333,6 +1381,8 @@ class LocalViewer(Mini3DViewer):
                             self.need_update = False
                             continue
 
+                        self.update_flame_model()  # Ensure the FLAME model is updated
+
                         cam = self.prepare_camera()
                         # time.sleep(0.05)
 
@@ -1340,9 +1390,9 @@ class LocalViewer(Mini3DViewer):
                             with cuda_error_handling():
                                 # rgb_splatting = self.safe_render(cam)
                                 # rgb
-                                torch.cuda.synchronize()
+                                # torch.cuda.synchronize()
                                 rgb_splatting = render(cam, self.gaussians, self.cfg.pipeline, torch.tensor(self.cfg.background_color).cuda(), scaling_modifier=dpg.get_value("_slider_scaling_modifier"))["render"].permute(1, 2, 0).contiguous()
-                                torch.cuda.synchronize()
+                                # torch.cuda.synchronize()
                                 # opacity
                                 # override_color = torch.ones_like(self.gaussians._xyz).cuda()
                                 # background_color = torch.tensor(self.cfg.background_color).cuda() * 0
@@ -1392,8 +1442,8 @@ class LocalViewer(Mini3DViewer):
                     
                     frame_duration = time.time() - current_time
                     sleep_time = max(0, frame_time - frame_duration)
-                    if sleep_time > 0:
-                        time.sleep(sleep_time)
+                    # if sleep_time > 0:
+                    #     time.sleep(sleep_time)
                     
                     # Update last frame time for next iteration
                     last_frame_time = time.time()
@@ -1411,3 +1461,4 @@ if __name__ == "__main__":
     cfg = tyro.cli(Config)
     gui = LocalViewer(cfg)
     gui.run()
+

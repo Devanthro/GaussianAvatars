@@ -9,7 +9,7 @@ import traceback
 AVATAR_PATH = "/workspace/avatars/"
 
 OVR_ARKIT_BLENDSHAPES_MAP = {
-    "19": ("jawOpen", 1.5),
+    "19": ("jawOpen", 1.7),
     "50": ("cheekPuff", 1.0),  # Note: Cheek Suck L/R in old naming
     "88": ("browInnerUp", 1.0),  # Note: Used for both L/R in old naming
     "89": ("browDown_L", 1.0),
@@ -35,32 +35,40 @@ OVR_ARKIT_BLENDSHAPES_MAP = {
     "109": ("cheekSquint_R", 1.0),
     "110": ("noseSneer_L", 1.0),
     "111": ("noseSneer_R", 1.0),
-    "113": ("jawForward", 1.5),
-    "114": ("jawLeft", 1.5),
-    "115": ("jawRight", 1.5),
-    "116": ("mouthFunnel", 1.5),  # Note: Used for all funnel variants in old naming
-    "117": ("mouthPucker", 1.5),  # Note: Used for both L/R in old naming
-    "118": ("mouthLeft", 1.5),
-    "119": ("mouthRight", 1.5),
-    "120": ("mouthRollUpper", 1.5),  # Note: Lip Suck LT/RT in old naming
-    "121": ("mouthRollLower", 1.5),  # Note: Lip Suck LB/RB in old naming
-    "122": ("mouthShrugUpper", 1.5),
-    "123": ("mouthShrugLower", 1.5),
-    "124": ("mouthClose", 1.5),
+    "113": ("jawForward", 1.0),
+    "114": ("jawLeft", 1.0),
+    "115": ("jawRight", 1.0),
+    "116": ("mouthFunnel", 2.0),  # Note: Used for all funnel variants in old naming
+    "117": ("mouthPucker", 2.0),  # Note: Used for both L/R in old naming
+    "118": ("mouthLeft", 1.3),
+    "119": ("mouthRight", 1.3),
+    "120": ("mouthRollUpper", 1.0),  # Note: Lip Suck LT/RT in old naming
+    "121": ("mouthRollLower", 1.0),  # Note: Lip Suck LB/RB in old naming
+    "122": ("mouthShrugUpper", 1),
+    "123": ("mouthShrugLower", 1),
+    "124": ("mouthClose", 1.0),
     "125": ("mouthSmile_L", 1.5),
     "126": ("mouthSmile_R", 1.5),
-    "127": ("mouthFrown_L", 1.5),
-    "128": ("mouthFrown_R", 1.5),
-    "129": ("mouthDimple_L", 1.5),
-    "130": ("mouthDimple_R", 1.5),
-    "131": ("mouthUpperUp_L", 1.5),
-    "132": ("mouthUpperUp_R", 1.5),
-    "133": ("mouthLowerDown_L", 1.5),
-    "134": ("mouthLowerDown_R", 1.5),
-    "135": ("mouthPress_L", 1.5),
-    "136": ("mouthPress_R", 1.5),
+    "127": ("mouthFrown_L", 1),
+    "128": ("mouthFrown_R", 1),
+    "129": ("mouthDimple_L", 1),
+    "130": ("mouthDimple_R", 1),
+    "131": ("mouthUpperUp_L", 1),
+    "132": ("mouthUpperUp_R", 1),
+    "133": ("mouthLowerDown_L", 1),
+    "134": ("mouthLowerDown_R", 1),
+    "135": ("mouthPress_L", 1),
+    "136": ("mouthPress_R", 1),
     "137": ("mouthStretch_L", 1.5),
     "138": ("mouthStretch_R", 1.5)
+}
+
+NAME_MAP = {
+    "raf": "rafael3",
+    "alona": "alona5",
+    "caya": "tatjana2",
+    "female": "martina",
+    "male": "tim"
 }
 
 # OVR_ARKIT_BLENDSHAPES_MAP = {
@@ -123,7 +131,7 @@ class ROS2Subscriber(Node):
         super().__init__('blendshape_subscriber')
         self.viewer = viewer
 
-        self.blendshape_data = None
+        self.blendshape_data = {}
         self.eyes_data = None
         
         # Initialize time tracking
@@ -156,28 +164,35 @@ class ROS2Subscriber(Node):
             1
         )
 
-        self.create_timer(1/8.0, self.timer_callback)
+        # self.create_timer(1/8.0, self.timer_callback)
 
     def timer_callback(self):
+
         if self.eyes_data is not None:
             self.viewer.update_eyes_from_ros(self.eyes_data)
         
-        if self.blendshape_data is not None:
+        if self.blendshape_data is not None and self.blendshape_data:
             self.viewer.update_blendshapes_from_ros(self.blendshape_data)
 
     def presence_callback(self, msg):
-        self.get_logger().info(f"Presence msg arrived: {msg.data}")
-        self.viewer.toggle_splatting(msg.data)
+        # self.get_logger().info(f"Presence msg arrived: {msg.data}")
+        self.viewer.splatting_visible = msg.data
+        # self.viewer.toggle_splatting(msg.data)
 
     def name_callback(self, msg):
-        self.viewer.unload_avatar()
-        self.viewer.load_avatar(f"{AVATAR_PATH}/{msg.data}")
+        if msg.data in NAME_MAP:
+            # self.get_logger().info(f"{NAME_MAP}
+            self.viewer.avatar_path = f"{AVATAR_PATH}/{NAME_MAP[msg.data]}"
+        else:
+            self.get_logger().info(f"Avatar name not found: {msg.data}")
+        # self.viewer.unload_avatar()
+        # self.viewer.load_avatar(f"{AVATAR_PATH}/{msg.data}")
 
     def expressions_callback(self, msg):
         # current_time = self.get_clock().now()
         # if (current_time - self.last_msg_time).nanoseconds / 1e9 >= self.desired_period:
         # self.get_logger().info('Received blendshape message:', throttle_duration_sec=1)
-        self.blendshape_data = {}
+        self.blendshape_data.clear()
         for index, value in zip(msg.name, msg.position):
             mapping = OVR_ARKIT_BLENDSHAPES_MAP.get(index, (index, 1.0))  # Default weight is 1.0
             blendshape_name, weight = mapping
@@ -186,12 +201,12 @@ class ROS2Subscriber(Node):
             normalized_value = (value/100.0) * weight
             self.blendshape_data[blendshape_name] = normalized_value
         # self.viewer.update_blendshapes_from_ros(self.blendshape_data)
-        self.get_logger().info(f"{list(self.blendshape_data.keys())[0]}: {list(self.blendshape_data.values())[0]}", throttle_duration_sec=10)
+        # self.get_logger().info(f"{list(self.blendshape_data.keys())[0]}: {list(self.blendshape_data.values())[0]}", throttle_duration_sec=10)
         # self.last_msg_time = current_time
 
     def eyes_callback(self, msg):
         self.eyes_data = [msg.pose.orientation.x / 100.0, msg.pose.orientation.y / 100.0]
-        self.get_logger().info(f"Eyes: {self.eyes_data}", throttle_duration_sec=10)
+        # self.get_logger().info(f"Eyes: {self.eyes_data}", throttle_duration_sec=10)
 
     # def expressions_callback(self, msg):
     #     self.get_logger().info('Received blendshape message:', throttle_duration_sec=1)
@@ -203,40 +218,40 @@ class ROS2Subscriber(Node):
     #         self.blendshape_data[blendshape_name] = normalized_value
 
 def main(viewer):
-    # rclpy.init()
-    # subscriber = ROS2Subscriber(viewer)
-    # rclpy.spin(subscriber)
-    # subscriber.destroy_node()
-    # rclpy.shutdown()
-    print("ROS2 node starting...")
-    try:
-        # Force a clean rclpy state
-        try:
-            rclpy.shutdown()
-        except:
-            pass
+    rclpy.init()
+    subscriber = ROS2Subscriber(viewer)
+    rclpy.spin(subscriber)
+    subscriber.destroy_node()
+    rclpy.shutdown()
+    # print("ROS2 node starting...")
+    # try:
+    #     # Force a clean rclpy state
+    #     try:
+    #         rclpy.shutdown()
+    #     except:
+    #         pass
             
-        # Initialize with explicit domain ID
-        rclpy.init()
-        print("rclpy initialized")
+    #     # Initialize with explicit domain ID
+    #     rclpy.init()
+    #     print("rclpy initialized")
         
-        # Create the node without context parameter
-        node = ROS2Subscriber(viewer)
-        print("ROS2 subscriber node created")
+    #     # Create the node without context parameter
+    #     node = ROS2Subscriber(viewer)
+    #     print("ROS2 subscriber node created")
         
-        # Use a more basic approach to spinning
-        try:
-            print("Starting manual node spinning")
-            while True:
-                rclpy.spin_once(node, timeout_sec=0.1)
-                time.sleep(0.01)
-        except KeyboardInterrupt:
-            pass
-        except Exception as e:
-            print(f"Error spinning node: {e}")
-        finally:
-            node.destroy_node()
-            rclpy.shutdown()
-    except Exception as e:
-        print(f"Error in ROS2 initialization: {e}")
-        traceback.print_exc()
+    #     # Use a more basic approach to spinning
+    #     try:
+    #         print("Starting manual node spinning")
+    #         while True:
+    #             rclpy.spin_once(node, timeout_sec=0.1)
+    #             time.sleep(0.01)
+    #     except KeyboardInterrupt:
+    #         pass
+    #     except Exception as e:
+    #         print(f"Error spinning node: {e}")
+    #     finally:
+    #         node.destroy_node()
+    #         rclpy.shutdown()
+    # except Exception as e:
+    #     print(f"Error in ROS2 initialization: {e}")
+    #     traceback.print_exc()
