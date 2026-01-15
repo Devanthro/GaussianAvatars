@@ -67,8 +67,9 @@ NAME_MAP = {
     "raf": "rafael3",
     "alona": "alona5",
     "caya": "tatjana2",
-    "female": "martina",
-    "male": "tim"
+    "female": "wiesbaden3",
+    "male": "ugur",
+    "juri": "juri"
 }
 
 # OVR_ARKIT_BLENDSHAPES_MAP = {

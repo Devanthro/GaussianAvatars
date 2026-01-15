@@ -624,6 +624,9 @@ class LocalViewer(Mini3DViewer):
             try:
                 blendshapes = np.array([self.blendshape_values[name] for name in ARKit_BLENDSHAPE_NAMES])
                 expressions, jaw = self.gaussians.flame_model.mask.convert_blendshapes_to_expressions(blendshapes)
+                #Add a constant to smile to avoid "resting bitchface"
+                expressions[0] = expressions[0]+1.5
+                expressions[3] = expressions[3]+0.5
                 self.flame_param['expr'] = expressions.unsqueeze(0)  # Add batch dimension
                 for i in range(len(jaw)): 
                     self.flame_param['jaw'][0, i] = jaw[i]
