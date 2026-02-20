@@ -1364,7 +1364,7 @@ class LocalViewer(Mini3DViewer):
                     elapsed = current_time - last_frame_time
 
                     if rclpy.ok():
-                        rclpy.spin_once(self.subscriber, timeout_sec=0)
+                        rclpy.spin_once(self.subscriber, timeout_sec=0.001)
                         if self.subscriber.eyes_data is not None:
                             self.update_eyes_from_ros(self.subscriber.eyes_data)
                         if self.subscriber.blendshape_data is not None:

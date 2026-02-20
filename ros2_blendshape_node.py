@@ -5,6 +5,8 @@ from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import  Bool, String
 import time
 import traceback
+import subprocess
+import os
 
 AVATAR_PATH = "/workspace/avatars/"
 
@@ -67,8 +69,9 @@ NAME_MAP = {
     "raf": "rafael3",
     "alona": "alona5",
     "caya": "tatjana2",
-    "female": "wiesbaden3",
-    "male": "ugur",
+    "female": "simone.png",
+    "male": "mark1",
+    "johannes": "hannes",
     "juri": "juri"
 }
 
@@ -134,9 +137,15 @@ class ROS2Subscriber(Node):
 
         self.blendshape_data = {}
         self.eyes_data = None
-        
+
         # Initialize time tracking
         self.last_msg_time = self.get_clock().now()
+
+        # Image display state
+        self.current_name = None
+        self.image_path = ""
+        self.presence = False
+        self.eog_process = None
         
         self.subscription = self.create_subscription(
             JointState,
@@ -176,16 +185,36 @@ class ROS2Subscriber(Node):
             self.viewer.update_blendshapes_from_ros(self.blendshape_data)
 
     def presence_callback(self, msg):
-        # self.get_logger().info(f"Presence msg arrived: {msg.data}")
-        self.viewer.splatting_visible = msg.data
+        self.presence = msg.data
+        # Image mode: don't show splatting, use eog instead
+        if self.image_path.endswith('.png'):
+            self.viewer.splatting_visible = False
+        else:
+            self.viewer.splatting_visible = msg.data
+        self.update_image_display()
         # self.viewer.toggle_splatting(msg.data)
 
     def name_callback(self, msg):
-        if msg.data in NAME_MAP:
-            # self.get_logger().info(f"{NAME_MAP}
-            self.viewer.avatar_path = f"{AVATAR_PATH}/{NAME_MAP[msg.data]}"
+        self.current_name = msg.data.strip().lower()
+        self.get_logger().info(f"Name callback: {self.current_name}, presence: {self.presence}")
+
+        if self.current_name not in NAME_MAP:
+            self.get_logger().info(f"Avatar name not found: {self.current_name}")
+            return
+
+        avatar_value = NAME_MAP[self.current_name]
+        self.image_path = f"{AVATAR_PATH}/{avatar_value}"
+        self.get_logger().info(f"Avatar value: {avatar_value}, image_path: {self.image_path}")
+
+        if avatar_value.endswith('.png'):
+            # Image mode - hide splatting, show image via eog
+            self.viewer.splatting_visible = False
+            self.update_image_display()
         else:
-            self.get_logger().info(f"Avatar name not found: {msg.data}")
+            # Gaussian avatar mode - hide any image, load avatar
+            self.hide_image()
+            self.viewer.avatar_path = self.image_path
+            self.viewer.splatting_visible = self.presence
         # self.viewer.unload_avatar()
         # self.viewer.load_avatar(f"{AVATAR_PATH}/{msg.data}")
 
@@ -208,6 +237,42 @@ class ROS2Subscriber(Node):
     def eyes_callback(self, msg):
         self.eyes_data = [msg.pose.orientation.x / 100.0, msg.pose.orientation.y / 100.0]
         # self.get_logger().info(f"Eyes: {self.eyes_data}", throttle_duration_sec=10)
+
+    def update_image_display(self):
+        if self.image_path.endswith('.png') and self.presence:
+            self.show_image(self.image_path)
+        else:
+            self.hide_image()
+
+    def show_image(self, path):
+        if self.eog_process is not None and self.eog_process.poll() is None:
+            return
+        try:
+            env = os.environ.copy()
+            env['DISPLAY'] = ':0'
+            # image_path = os.path.expanduser(f'{AVATAR_PATH}/mark.png')
+            image_path = path
+            self.eog_process = subprocess.Popen(
+                ['eog', '--fullscreen', image_path],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            self.get_logger().info(f'Displaying image: {image_path}')
+        except Exception as e:
+            self.get_logger().error(f'Failed to display image: {e}')
+
+    def hide_image(self):
+        if self.eog_process is not None and self.eog_process.poll() is None:
+            try:
+                self.eog_process.terminate()
+                self.eog_process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.eog_process.kill()
+            except Exception as e:
+                self.get_logger().error(f'Failed to hide image: {e}')
+            finally:
+                self.eog_process = None
 
     # def expressions_callback(self, msg):
     #     self.get_logger().info('Received blendshape message:', throttle_duration_sec=1)
