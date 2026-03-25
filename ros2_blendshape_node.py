@@ -9,6 +9,7 @@ import subprocess
 import os
 
 AVATAR_PATH = "/workspace/avatars/"
+IDLE_VIDEO_PATH = os.path.expanduser("/workspace/avatars/robody-sleeping.mov")
 
 OVR_ARKIT_BLENDSHAPES_MAP = {
     "19": ("jawOpen", 1.7),
@@ -146,6 +147,7 @@ class ROS2Subscriber(Node):
         self.image_path = ""
         self.presence = False
         self.eog_process = None
+        self.ffplay_process = None
         
         self.subscription = self.create_subscription(
             JointState,
@@ -176,6 +178,9 @@ class ROS2Subscriber(Node):
 
         # self.create_timer(1/8.0, self.timer_callback)
 
+        # Start idle video by default (no operator present on startup)
+        self.show_idle_video()
+
     def timer_callback(self):
 
         if self.eyes_data is not None:
@@ -192,6 +197,11 @@ class ROS2Subscriber(Node):
         else:
             self.viewer.splatting_visible = msg.data
         self.update_image_display()
+        # Show idle video when no operator is present
+        if not msg.data:
+            self.show_idle_video()
+        else:
+            self.hide_idle_video()
         # self.viewer.toggle_splatting(msg.data)
 
     def name_callback(self, msg):
@@ -273,6 +283,34 @@ class ROS2Subscriber(Node):
                 self.get_logger().error(f'Failed to hide image: {e}')
             finally:
                 self.eog_process = None
+
+    def show_idle_video(self):
+        if self.ffplay_process is not None and self.ffplay_process.poll() is None:
+            return  # already running
+        try:
+            env = os.environ.copy()
+            env['DISPLAY'] = ':0'
+            self.ffplay_process = subprocess.Popen(
+                ['ffplay', '-an', '-vf', 'setpts=7*PTS', '-fs', '-loop', '0', IDLE_VIDEO_PATH],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            self.get_logger().info(f'Playing idle video: {IDLE_VIDEO_PATH}')
+        except Exception as e:
+            self.get_logger().error(f'Failed to play idle video: {e}')
+
+    def hide_idle_video(self):
+        if self.ffplay_process is not None and self.ffplay_process.poll() is None:
+            try:
+                self.ffplay_process.terminate()
+                self.ffplay_process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.ffplay_process.kill()
+            except Exception as e:
+                self.get_logger().error(f'Failed to stop idle video: {e}')
+            finally:
+                self.ffplay_process = None
 
     # def expressions_callback(self, msg):
     #     self.get_logger().info('Received blendshape message:', throttle_duration_sec=1)
