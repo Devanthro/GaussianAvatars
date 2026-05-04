@@ -36,6 +36,7 @@ from mesh_renderer import NVDiffRenderer
 
 import rclpy
 from ros2_blendshape_node import ROS2Subscriber, OVR_ARKIT_BLENDSHAPES_MAP #main as ros2_main
+from ai_face_renderer import AIFaceRenderer
 import threading
 
 import logging
@@ -277,6 +278,13 @@ class LocalViewer(Mini3DViewer):
 
         rclpy.init()
         self.subscriber = ROS2Subscriber(self)
+
+        try:
+            self.ai_face_renderer = AIFaceRenderer('/workspace/avatars/happy_ai.png')
+            print("AI face renderer loaded")
+        except Exception as e:
+            print(f"[AIFace] Not available: {e}")
+            self.ai_face_renderer = None
 
         # ros2_thread = threading.Thread(target=ros2_main, args=(self,))
         # # # time.sleep(3)
@@ -1376,6 +1384,18 @@ class LocalViewer(Mini3DViewer):
                             self.load_avatar(self.avatar_path)
                         
               
+
+                    # AI face mode: render 2D animated face
+                    if (self.need_update
+                            and getattr(self, 'ai_face_renderer', None) is not None
+                            and self.subscriber.ai_active
+                            and not self.subscriber.presence):
+                        bs = dict(self.blendshape_values)
+                        self.render_buffer = self.ai_face_renderer.render(bs, self.W, self.H)
+                        if self.render_buffer.shape[0] == self.H and self.render_buffer.shape[1] == self.W:
+                            dpg.set_value("_texture", self.render_buffer)
+                        self.refresh_stat()
+                        self.need_update = False
 
                     if self.need_update or self.playing:
                         if not hasattr(self, 'gaussians') or self.gaussians is None:

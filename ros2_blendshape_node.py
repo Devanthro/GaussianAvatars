@@ -69,11 +69,12 @@ OVR_ARKIT_BLENDSHAPES_MAP = {
 NAME_MAP = {
     "raf": "rafael3",
     "alona": "alona5",
-    "caya": "tatjana2",
+    "caya": "avatar01_05_360k",
     "female": "simone.png",
     "male": "mark1",
     "johannes": "hannes",
-    "juri": "juri"
+    "juri": "juri",
+    "ai": "happy_ai.png"
 }
 
 # OVR_ARKIT_BLENDSHAPES_MAP = {
@@ -148,7 +149,10 @@ class ROS2Subscriber(Node):
         self.presence = False
         self.eog_process = None
         self.ffplay_process = None
-        
+
+        # AI face mode
+        self.ai_active = False
+
         self.subscription = self.create_subscription(
             JointState,
             '/operator/face/expressions',
@@ -176,6 +180,12 @@ class ROS2Subscriber(Node):
             1
         )
 
+        self.ai_mouth_subscription = self.create_subscription(
+            JointState, '/ai/face/mouth', self.ai_mouth_callback, 1)
+
+        self.ai_active_subscription = self.create_subscription(
+            Bool, '/ai/face/active', self.ai_active_callback, 1)
+
         # self.create_timer(1/8.0, self.timer_callback)
 
         # Start idle video by default (no operator present on startup)
@@ -194,15 +204,32 @@ class ROS2Subscriber(Node):
         # Image mode: don't show splatting, use eog instead
         if self.image_path.endswith('.png'):
             self.viewer.splatting_visible = False
+        elif self.ai_active and not msg.data:
+            self.viewer.splatting_visible = False
         else:
             self.viewer.splatting_visible = msg.data
         self.update_image_display()
-        # Show idle video when no operator is present
-        if not msg.data:
+        if not msg.data and not self.ai_active:
             self.show_idle_video()
         else:
             self.hide_idle_video()
-        # self.viewer.toggle_splatting(msg.data)
+
+    def ai_active_callback(self, msg):
+        was_active = self.ai_active
+        self.ai_active = msg.data
+        self.get_logger().info(f"AI face active: {msg.data}")
+        if msg.data and not was_active and not self.presence:
+            self.hide_idle_video()
+            self.viewer.need_update = True
+        elif not msg.data and not self.presence:
+            self.show_idle_video()
+
+    def ai_mouth_callback(self, msg):
+        if not self.ai_active or self.presence:
+            return
+        self.blendshape_data.clear()
+        for name, value in zip(msg.name, msg.position):
+            self.blendshape_data[name] = value
 
     def name_callback(self, msg):
         self.current_name = msg.data.strip().lower()

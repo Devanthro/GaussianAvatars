@@ -333,7 +333,7 @@ class GaussianModel:
 
 
         #Remove all gaussians with opacity lower than 0.05 when loading them from file
-        mask = (self.get_opacity > 0.05).squeeze()
+        mask = (self.get_opacity > 0.005).squeeze()
 
         self.binding = self.binding[mask]
         self._xyz = self._xyz[mask]
