@@ -37,6 +37,7 @@ from mesh_renderer import NVDiffRenderer
 import rclpy
 from ros2_blendshape_node import ROS2Subscriber, OVR_ARKIT_BLENDSHAPES_MAP #main as ros2_main
 from ai_face_renderer import AIFaceRenderer
+from audio_mouth_driver import AudioMouthDriver
 import threading
 
 import logging
@@ -285,6 +286,8 @@ class LocalViewer(Mini3DViewer):
         except Exception as e:
             print(f"[AIFace] Not available: {e}")
             self.ai_face_renderer = None
+
+        self.audio_mouth_driver = AudioMouthDriver()
 
         # ros2_thread = threading.Thread(target=ros2_main, args=(self,))
         # # # time.sleep(3)
@@ -1385,12 +1388,11 @@ class LocalViewer(Mini3DViewer):
                         
               
 
-                    # AI face mode: render 2D animated face
-                    if (self.need_update
-                            and getattr(self, 'ai_face_renderer', None) is not None
+                    # AI face mode: render 2D animated face driven by audio
+                    if (getattr(self, 'ai_face_renderer', None) is not None
                             and self.subscriber.ai_active
-                            and not self.subscriber.presence):
-                        bs = dict(self.blendshape_values)
+                            and self.subscriber.presence):
+                        bs = self.audio_mouth_driver.get_blendshapes()
                         self.render_buffer = self.ai_face_renderer.render(bs, self.W, self.H)
                         if self.render_buffer.shape[0] == self.H and self.render_buffer.shape[1] == self.W:
                             dpg.set_value("_texture", self.render_buffer)

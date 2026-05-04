@@ -69,12 +69,12 @@ OVR_ARKIT_BLENDSHAPES_MAP = {
 NAME_MAP = {
     "raf": "rafael3",
     "alona": "alona5",
-    "caya": "avatar01_05_360k",
-    "female": "simone.png",
+    "caya": "ai",
+    "female": "avatar01_05_360k",
     "male": "mark1",
     "johannes": "hannes",
     "juri": "juri",
-    "ai": "happy_ai.png"
+    "ai": "ai"
 }
 
 # OVR_ARKIT_BLENDSHAPES_MAP = {
@@ -201,15 +201,21 @@ class ROS2Subscriber(Node):
 
     def presence_callback(self, msg):
         self.presence = msg.data
+        if self.ai_active:
+            self.viewer.splatting_visible = False
+            if msg.data:
+                self.hide_idle_video()
+                self.viewer.need_update = True
+            else:
+                self.show_idle_video()
+            return
         # Image mode: don't show splatting, use eog instead
         if self.image_path.endswith('.png'):
-            self.viewer.splatting_visible = False
-        elif self.ai_active and not msg.data:
             self.viewer.splatting_visible = False
         else:
             self.viewer.splatting_visible = msg.data
         self.update_image_display()
-        if not msg.data and not self.ai_active:
+        if not msg.data:
             self.show_idle_video()
         else:
             self.hide_idle_video()
@@ -242,6 +248,21 @@ class ROS2Subscriber(Node):
         avatar_value = NAME_MAP[self.current_name]
         self.image_path = f"{AVATAR_PATH}/{avatar_value}"
         self.get_logger().info(f"Avatar value: {avatar_value}, image_path: {self.image_path}")
+
+        if avatar_value == 'ai':
+            self.ai_active = True
+            self.viewer.splatting_visible = False
+            self.hide_image()
+            self.hide_idle_video()
+            self.viewer.audio_mouth_driver.start()
+            self.viewer.need_update = True
+            self.get_logger().info("AI face mode: audio mouth driver started")
+            return
+
+        # Switching away from AI mode — stop audio driver
+        if self.ai_active:
+            self.ai_active = False
+            self.viewer.audio_mouth_driver.stop()
 
         if avatar_value.endswith('.png'):
             # Image mode - hide splatting, show image via eog
