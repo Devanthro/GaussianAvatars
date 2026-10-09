@@ -258,6 +258,8 @@ class Mini3DViewer:
         dpg.create_viewport(title=title, width=self.W, height=self.H, resizable=True, always_on_top=True)
         dpg.setup_dearpygui()
         dpg.show_viewport()
+        # Cover the robot's screen: fullscreen on the primary monitor, no title bar.
+        dpg.toggle_viewport_fullscreen()
 
         # self.make_window_override_redirect()
 
