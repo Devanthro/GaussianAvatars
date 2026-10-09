@@ -32,6 +32,11 @@ CENTROID_LOW = 400.0
 CENTROID_HIGH = 2500.0
 OUTPUT_SMOOTH = 0.7
 
+EMPHASIS_WINDOW = 1.2
+EMPHASIS_THRESHOLD = 3.0
+BROW_ATTACK = 0.15
+BROW_RELEASE = 0.985
+
 
 class AudioMouthDriver:
 
@@ -46,6 +51,11 @@ class AudioMouthDriver:
         self._centroid = 0.0
         self._silence_time = 0.0
         self._breath_phase = 0.0
+
+        self._rms_history = []
+        self._rms_sum = 0.0
+        self._brow_value = 0.0
+        self._max_rms_history = int(EMPHASIS_WINDOW * sample_rate / CHUNK_SAMPLES)
 
         # Pre-compute frequency bins for centroid calculation
         self._freqs = np.fft.rfftfreq(CHUNK_SAMPLES, 1.0 / sample_rate).astype(np.float32)
@@ -83,6 +93,7 @@ class AudioMouthDriver:
         self._bs['mouthShrugUpper'] = 0.0
         self._bs['mouthPress_L'] = 0.0
         self._bs['mouthPress_R'] = 0.0
+        self._bs['browInnerUp'] = 0.0
 
     def get_blendshapes(self):
         with self._lock:
@@ -112,6 +123,18 @@ class AudioMouthDriver:
             self._envelope = rms
         else:
             self._envelope = self._envelope * RELEASE_COEFF + rms * (1.0 - RELEASE_COEFF)
+
+        # Emphasis detection: RMS spike above running average → brow raise
+        self._rms_history.append(rms)
+        self._rms_sum += rms
+        if len(self._rms_history) > self._max_rms_history:
+            self._rms_sum -= self._rms_history.pop(0)
+        avg_rms = self._rms_sum / len(self._rms_history) if self._rms_history else rms
+        if avg_rms > SILENCE_THRESHOLD and rms > avg_rms * EMPHASIS_THRESHOLD:
+            emphasis = min((rms / avg_rms - 1.0), 1.0)
+            self._brow_value = self._brow_value + (emphasis - self._brow_value) * BROW_ATTACK
+        else:
+            self._brow_value *= BROW_RELEASE
 
         dt = len(chunk) / self.sample_rate
 
@@ -160,6 +183,7 @@ class AudioMouthDriver:
                 'mouthLowerDown_R': amplitude * 0.5,
                 'mouthSmile_L': REST_SMILE * (1.0 - new_jaw),
                 'mouthSmile_R': REST_SMILE * (1.0 - new_jaw),
+                'browInnerUp': self._brow_value * 0.6,
             }
             s = OUTPUT_SMOOTH
             bs = self._bs
@@ -172,7 +196,8 @@ class AudioMouthDriver:
         for k in ('jawOpen', 'mouthFunnel', 'mouthPucker',
                   'mouthStretch_L', 'mouthStretch_R',
                   'mouthUpperUp_L', 'mouthUpperUp_R',
-                  'mouthLowerDown_L', 'mouthLowerDown_R'):
+                  'mouthLowerDown_L', 'mouthLowerDown_R',
+                  'browInnerUp'):
             bs[k] *= decay
         bs['mouthSmile_L'] += (REST_SMILE - bs['mouthSmile_L']) * (1.0 - decay)
         bs['mouthSmile_R'] += (REST_SMILE - bs['mouthSmile_R']) * (1.0 - decay)

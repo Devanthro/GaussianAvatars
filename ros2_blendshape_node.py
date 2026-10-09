@@ -70,10 +70,10 @@ NAME_MAP = {
     "raf": "rafael3",
     "alona": "alona5",
     "caya": "ai",
-    "female": "avatar01_05_360k",
+    "female": "lia",
     "male": "mark1",
     "johannes": "hannes",
-    "juri": "juri",
+    "juri": "kilian",
     "ai": "ai"
 }
 
@@ -150,8 +150,8 @@ class ROS2Subscriber(Node):
         self.eog_process = None
         self.ffplay_process = None
 
-        # AI face mode
-        self.ai_active = False
+        # AI face mode — active by default on idle
+        self.ai_active = True
 
         self.subscription = self.create_subscription(
             JointState,
@@ -188,8 +188,9 @@ class ROS2Subscriber(Node):
 
         # self.create_timer(1/8.0, self.timer_callback)
 
-        # Start idle video by default (no operator present on startup)
-        self.show_idle_video()
+        # Start AI face by default on idle (idle video still available via show_idle_video)
+        self.viewer.audio_mouth_driver.start()
+        self.viewer.need_update = True
 
     def timer_callback(self):
 
@@ -201,24 +202,34 @@ class ROS2Subscriber(Node):
 
     def presence_callback(self, msg):
         self.presence = msg.data
-        if self.ai_active:
-            self.viewer.splatting_visible = False
-            if msg.data:
-                self.hide_idle_video()
-                self.viewer.need_update = True
-            else:
-                self.show_idle_video()
-            return
-        # Image mode: don't show splatting, use eog instead
-        if self.image_path.endswith('.png'):
-            self.viewer.splatting_visible = False
-        else:
-            self.viewer.splatting_visible = msg.data
-        self.update_image_display()
+
         if not msg.data:
-            self.show_idle_video()
-        else:
+            # Return to AI face on idle
+            self.ai_active = True
+            self.viewer.splatting_visible = False
+            self.hide_image()
+            self.viewer.audio_mouth_driver.start()
+            self.viewer.need_update = True
             self.hide_idle_video()
+            return
+
+        # Presence is True — switch to human avatar if a valid name is set
+        self.hide_idle_video()
+        avatar_value = NAME_MAP.get(self.current_name)
+        if avatar_value is not None and avatar_value != 'ai':
+            if self.ai_active:
+                self.ai_active = False
+                self.viewer.audio_mouth_driver.stop()
+            if avatar_value.endswith('.png'):
+                self.viewer.splatting_visible = False
+                self.update_image_display()
+            else:
+                self.hide_image()
+                self.viewer.splatting_visible = True
+        else:
+            self.viewer.splatting_visible = False
+
+        self.viewer.need_update = True
 
     def ai_active_callback(self, msg):
         was_active = self.ai_active
@@ -238,7 +249,10 @@ class ROS2Subscriber(Node):
             self.blendshape_data[name] = value
 
     def name_callback(self, msg):
-        self.current_name = msg.data.strip().lower()
+        incoming_name = msg.data.strip().lower()
+        if incoming_name == self.current_name:
+            return
+        self.current_name = incoming_name
         self.get_logger().info(f"Name callback: {self.current_name}, presence: {self.presence}")
 
         if self.current_name not in NAME_MAP:
@@ -259,19 +273,25 @@ class ROS2Subscriber(Node):
             self.get_logger().info("AI face mode: audio mouth driver started")
             return
 
+        # Trigger avatar load on name arrival so render loop preloads it
+        if not avatar_value.endswith('.png'):
+            self.viewer.avatar_path = self.image_path
+
+        # Only switch away from AI face if operator is actually present
+        if not self.presence:
+            self.get_logger().info(f"Ignoring name '{self.current_name}' — no presence, keeping AI face")
+            return
+
         # Switching away from AI mode — stop audio driver
         if self.ai_active:
             self.ai_active = False
             self.viewer.audio_mouth_driver.stop()
 
         if avatar_value.endswith('.png'):
-            # Image mode - hide splatting, show image via eog
             self.viewer.splatting_visible = False
             self.update_image_display()
         else:
-            # Gaussian avatar mode - hide any image, load avatar
             self.hide_image()
-            self.viewer.avatar_path = self.image_path
             self.viewer.splatting_visible = self.presence
         # self.viewer.unload_avatar()
         # self.viewer.load_avatar(f"{AVATAR_PATH}/{msg.data}")

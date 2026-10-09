@@ -277,8 +277,7 @@ class LocalViewer(Mini3DViewer):
 
         self.need_update = False
 
-        rclpy.init()
-        self.subscriber = ROS2Subscriber(self)
+        self.audio_mouth_driver = AudioMouthDriver()
 
         try:
             self.ai_face_renderer = AIFaceRenderer('/workspace/avatars/happy_ai.png')
@@ -287,7 +286,8 @@ class LocalViewer(Mini3DViewer):
             print(f"[AIFace] Not available: {e}")
             self.ai_face_renderer = None
 
-        self.audio_mouth_driver = AudioMouthDriver()
+        rclpy.init()
+        self.subscriber = ROS2Subscriber(self)
 
         # ros2_thread = threading.Thread(target=ros2_main, args=(self,))
         # # # time.sleep(3)
@@ -1390,8 +1390,7 @@ class LocalViewer(Mini3DViewer):
 
                     # AI face mode: render 2D animated face driven by audio
                     if (getattr(self, 'ai_face_renderer', None) is not None
-                            and self.subscriber.ai_active
-                            and self.subscriber.presence):
+                            and self.subscriber.ai_active):
                         bs = self.audio_mouth_driver.get_blendshapes()
                         self.render_buffer = self.ai_face_renderer.render(bs, self.W, self.H)
                         if self.render_buffer.shape[0] == self.H and self.render_buffer.shape[1] == self.W:
