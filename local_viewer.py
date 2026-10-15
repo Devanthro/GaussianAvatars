@@ -84,6 +84,15 @@ class Config(Mini3DViewerConfig):
     load it like a normal sequence. """
     demo_mode: bool = False
     """The UI will be simplified in demo mode."""
+    tracked_rest_pose: bool = False
+    """Start from the median tracked head rotation and neck pose (from flame_param.npz) instead of zeros.
+    Use for avatars whose tracking split the head pose between global rotation and neck."""
+    white_key_chroma: float = 0.0
+    """Blacken gray/white pixels toward the frame edges whose chroma (max-min)/max is below
+    this (0 disables). Removes the white halo that avatars trained on white keep at the ears."""
+    white_key_radius: float = 0.55
+    """Distance from the center (1 is the middle of each frame edge) where the white key starts;
+    it is at full strength 0.2 further out, so the eyes and center highlights are never keyed."""
 
 ARKit_BLENDSHAPE_NAMES = [
     "browDown_L", "browDown_R", "browInnerUp", "browOuterUp_L", "browOuterUp_R",
@@ -361,6 +370,23 @@ class LocalViewer(Mini3DViewer):
                 logger.error(f"Error in render: {str(e)}")
                 logger.error(traceback.format_exc())
                 raise
+
+    def key_out_white(self, rgb):
+        """Fade near-colorless bright pixels to black, only outside a central oval. rgb is (H, W, 3) on the GPU."""
+        H, W = rgb.shape[:2]
+        if getattr(self, "_white_key_edge", None) is None or self._white_key_edge.shape[:2] != (H, W):
+            ys = torch.arange(H, device=rgb.device, dtype=torch.float32)[:, None]
+            xs = torch.arange(W, device=rgb.device, dtype=torch.float32)[None, :]
+            d = torch.sqrt(((xs - (W - 1) / 2) / (W / 2)) ** 2 + ((ys - (H - 1) / 2) / (H / 2)) ** 2)
+            self._white_key_edge = ((d - self.cfg.white_key_radius) / 0.2).clamp(0, 1)[..., None]
+        mx = rgb.max(dim=-1, keepdim=True).values
+        mn = rgb.min(dim=-1, keepdim=True).values
+        chroma = (mx - mn) / mx.clamp_min(1e-3)
+        c = self.cfg.white_key_chroma
+        colorless = ((c - chroma) / (0.5 * c)).clamp(0, 1)   # 1 well below the threshold, 0 above it
+        bright = ((mx - 0.15) / 0.15).clamp(0, 1)            # leave the dark background and shadows alone
+        key = colorless * bright * self._white_key_edge
+        return rgb * (1 - key)
 
     def cleanup(self):
         if hasattr(self, 'gpu_monitor'):
@@ -644,7 +670,11 @@ class LocalViewer(Mini3DViewer):
                     if i==0:
                         self.flame_param['jaw'][0, i] += 0.03 
 
-                self.flame_param['neck'][0, 0] = 0.1 # Neck pitch a bit down for a more natural look
+                if self.rest_neck is not None:
+                    self.flame_param['neck'][0] = self.rest_neck
+                    self.flame_param['neck'][0, 0] += 0.1 # Neck pitch a bit down for a more natural look
+                else:
+                    self.flame_param['neck'][0, 0] = 0.1 # Neck pitch a bit down for a more natural look
 
                 if self.eyes_data is not None:
                     self.flame_param['eyes'][0, 0] = self.eyes_data[1]  # First eye
@@ -778,13 +808,13 @@ class LocalViewer(Mini3DViewer):
         else:
             self.gaussians = GaussianModel(self.cfg.sh_degree)
 
-        # Reset FLAME parameters if applicable
-        if self.gaussians.binding is not None:
-            self.reset_flame_param()
-            
         # Load the new avatar
         self.gaussians.load_ply(point_path, has_target=False, motion_path=motion_path, disable_fid=[])
-            
+
+        # Reset FLAME parameters if applicable (after loading, so the tracked rest pose can use the avatar's shape)
+        if self.gaussians.binding is not None:
+            self.reset_flame_param()
+
         # Update UI elements
         if self.gaussians.binding is not None:
             self.num_timesteps = self.gaussians.num_timesteps
@@ -1017,6 +1047,42 @@ class LocalViewer(Mini3DViewer):
             'eyes': torch.zeros(1, 6),
             'translation': torch.zeros(1, 3),
         }
+        self.rest_neck = None
+        flame_param_path = Path(self.cfg.point_path).parent / "flame_param.npz" if self.cfg.point_path else None
+        if (self.cfg.tracked_rest_pose and flame_param_path is not None and flame_param_path.exists()
+                and getattr(self.gaussians, 'flame_param', None) is not None):
+            tracked = np.load(flame_param_path)
+            rest_neck = np.median(tracked['neck_pose'], axis=0)
+            self.rest_neck = torch.from_numpy(rest_neck).float()
+
+            # Keep the tracked neck bend (it deforms the Gaussians), but choose the global rotation so the
+            # head faces the same way as the default demo pose (rotation 0, neck pitch 0.1).
+            demo_neck = np.array([0.1, 0., 0.])
+            neck_used = rest_neck + demo_neck  # matches update_flame_model()
+            rotation = (R.from_rotvec(demo_neck) * R.from_rotvec(neck_used).inv()).as_rotvec()
+            self.flame_param['rotation'][0] = torch.from_numpy(rotation).float()
+            self.flame_param['neck'][0] = torch.from_numpy(neck_used).float()
+
+            # The global rotation pivots around the neck root, so shift the head back to where the default pose puts it.
+            def mesh_center(rotation, neck):
+                with torch.no_grad():
+                    verts, _ = self.gaussians.flame_model(
+                        self.gaussians.flame_param['shape'][None, ...],
+                        self.flame_param['expr'].cuda(),
+                        torch.tensor(rotation, dtype=torch.float32)[None].cuda(),
+                        torch.tensor(neck, dtype=torch.float32)[None].cuda(),
+                        self.flame_param['jaw'].cuda(),
+                        self.flame_param['eyes'].cuda(),
+                        self.flame_param['translation'].cuda(),
+                        zero_centered_at_root_node=False,
+                        return_landmarks=False,
+                        return_verts_cano=True,
+                        static_offset=self.gaussians.flame_param['static_offset'],
+                    )
+                return verts[0].mean(dim=0).cpu()
+            self.flame_param['translation'][0] = mesh_center(np.zeros(3), demo_neck) - mesh_center(rotation, neck_used)
+            print(f"Using tracked rest pose: neck={self.rest_neck.tolist()}, rotation={rotation.tolist()}, "
+                  f"translation={self.flame_param['translation'][0].tolist()}")
 
     def define_gui(self):
         super().define_gui()
@@ -1416,6 +1482,8 @@ class LocalViewer(Mini3DViewer):
                                 # rgb
                                 # torch.cuda.synchronize()
                                 rgb_splatting = render(cam, self.gaussians, self.cfg.pipeline, torch.tensor(self.cfg.background_color).cuda(), scaling_modifier=dpg.get_value("_slider_scaling_modifier"))["render"].permute(1, 2, 0).contiguous()
+                                if self.cfg.white_key_chroma > 0:
+                                    rgb_splatting = self.key_out_white(rgb_splatting)
                                 # torch.cuda.synchronize()
                                 # opacity
                                 # override_color = torch.ones_like(self.gaussians._xyz).cuda()
