@@ -21,6 +21,24 @@ else
     echo "/workspace/avatars is read-only; not rendering missing thumbnails" >&2
 fi
 
+# Wait for a screen: without one GLFW aborts the viewer (glfwGetVideoMode:
+# Assertion `monitor != NULL'), Docker starts it again, and every start ends in
+# a core dump. A display connector that reports anything but "disconnected"
+# counts as a screen; with no connector to ask, the viewer starts at once.
+display_attached() {
+    local statuses
+    statuses=$(cat /sys/class/drm/card*-*/status 2>/dev/null) || return 0
+    grep -qvx disconnected <<<"$statuses"
+}
+waited=0
+until display_attached; do
+    if (( waited % 300 == 0 )); then
+        echo "No screen connected (/sys/class/drm/*/status); waiting for one before starting the viewer" >&2
+    fi
+    sleep 5
+    waited=$((waited + 5))
+done
+
 python local_viewer.py --point_path /workspace/avatars/$AVATAR_NAME/point_cloud.ply --sh-degree 0 --radius 0.65 --background-color 0 0 0 --demo-mode --tracked-rest-pose \
     --grid-spacing 6 --grid-alpha 0.75 --grid-sharpness 0.8 \
     --vignette-strength 0.92 --vignette-radius 0.57 --vignette-end 1.1 --vignette-shape 2 \
