@@ -136,6 +136,95 @@ python local_viewer.py \
 
 ### [3. Offline Rendering](doc/offline_render.md)
 
+## On the robot
+
+### Avatar list for the operator app
+
+The operator app (TeleportVR) used to hardcode the faces it offers. Instead it
+asks the robot which avatars are installed and gets their thumbnails with the
+list, so a newly trained avatar shows up without an app release, and the app
+cannot offer a face the robot does not have.
+
+Everything uses stock ROS 2 types — ROS 2 has no standard string-array message,
+and a custom one would need an interface package in the ROS-TCP-Endpoint
+workspace plus generated C# classes in Unity. All three interfaces carry the
+same JSON payload. `{robot}` is the robot name, e.g. `charlie`.
+
+| Interface | Type | Purpose |
+| --- | --- | --- |
+| `/robody/{robot}/avatar/list` | `std_srvs/srv/Trigger` | ask for the list |
+| `/robody/{robot}/avatar/list/reply` | `std_msgs/msg/String` | the list, pushed on change |
+| `/robody/{robot}/avatar/list/request` | `std_msgs/msg/Empty` | ask for the list over a topic |
+
+```shell
+# the list, as a service call
+ros2 service call /robody/charlie/avatar/list std_srvs/srv/Trigger
+
+# the list, over topics: one request gives exactly one reply
+ros2 topic echo /robody/charlie/avatar/list/reply
+ros2 topic pub --once /robody/charlie/avatar/list/request std_msgs/msg/Empty
+```
+
+The service answers `success = true` with the payload in `message`, or
+`success = false` with the reason while the first directory scan is still
+running.
+
+`/avatar/list/reply` is published once when the node is ready, whenever the
+list or `active` changes, and once per message on the request topic — **never
+on a timer**. Its QoS is reliable, transient local, depth 1, so a native ROS 2
+subscriber that joins late still receives the last list. ROS-TCP-Endpoint
+subscribes as volatile and does not get that last sample, which is why the app
+also has the service and the request topic.
+
+#### JSON payload
+
+```json
+{
+  "version": 1,
+  "revision": "c41f9a",
+  "active": "raf",
+  "avatars": [
+    {
+      "id": "raf",
+      "display_name": "Rafael",
+      "thumbnail_jpeg_base64": "/9j/4AAQSkZJRgABAQ..."
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `version` | payload schema version, currently `1` |
+| `revision` | hash over the ids, display names and thumbnails — **not** over `active`. The app re-decodes thumbnails only when it changes. |
+| `active` | the avatar the robot is showing, or `""` |
+| `avatars` | the list, in the order the app should show it |
+| `avatars[].id` | exactly the string the node accepts on `/operator/name` and in the `name` field of `/operator/face/position` |
+| `avatars[].display_name` | UTF-8 label shown in the headset, e.g. `"Jürgen"` |
+| `avatars[].thumbnail_jpeg_base64` | square JPEG, 192×192, quality ~85, ≤ 20 KB before base64 |
+
+The list comes from a scan of `/workspace/avatars`: a subdirectory holding a
+`.ply` is an avatar, with optional `avatar.json` (`{"display_name": "Jürgen"}`)
+and `thumbnail.jpg` next to it. The directory is rescanned on change and at
+least every 20 s, so adding or removing an avatar changes `revision` and
+publishes within seconds, with no restart.
+
+Thumbnails are pre-rendered once per avatar, on a machine with a GPU, instead of
+by the running node — an avatar without one falls back to a placeholder tile:
+
+```shell
+python3 render_thumbnails.py --avatar TA2R-57   # writes thumbnail.jpg
+```
+
+Avatars are addressed by folder name, except for the faces the app has been
+sending since before this list existed (`raf`, `alona`, `caya`, `female`,
+`male`, `johannes`, `juri`), which keep their ids — so app builds already in
+use keep working.
+
+**[Full documentation: doc/avatar_list.md](doc/avatar_list.md)** — ids and
+folders, thumbnail fallbacks, rescan details, robot-name resolution and how to
+inspect the payload without ROS.
+
 ## Cite
 
 If you find our paper or code useful in your research, please cite with the following BibTeX entry:

@@ -5,8 +5,13 @@ from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import  Bool, String
 import time
 import traceback
+import subprocess
+import os
+
+from ros2_avatar_list import AvatarListInterface
 
 AVATAR_PATH = "/workspace/avatars/"
+IDLE_VIDEO_PATH = os.path.expanduser("/workspace/avatars/robody-sleeping.mov")
 
 OVR_ARKIT_BLENDSHAPES_MAP = {
     "19": ("jawOpen", 1.7),
@@ -63,12 +68,19 @@ OVR_ARKIT_BLENDSHAPES_MAP = {
     "138": ("mouthStretch_R", 1.5)
 }
 
+#: Legacy ids the operator app has been sending since before the avatar list
+#: existed. They keep working unchanged; avatars added later are addressed by
+#: their folder name, which the avatar list hands to the app (see
+#: ``avatar_registry.py``), so a newly trained avatar needs no code change here.
 NAME_MAP = {
     "raf": "rafael3",
     "alona": "alona5",
-    "caya": "tatjana2",
-    "female": "martina",
-    "male": "tim"
+    "caya": "ai",
+    "female": "lia",
+    "male": "mark1",
+    "johannes": "hannes",
+    "juri": "kilian",
+    "ai": "ai"
 }
 
 # OVR_ARKIT_BLENDSHAPES_MAP = {
@@ -133,10 +145,21 @@ class ROS2Subscriber(Node):
 
         self.blendshape_data = {}
         self.eyes_data = None
-        
+
         # Initialize time tracking
         self.last_msg_time = self.get_clock().now()
-        
+
+        # Image display state
+        self.current_name = None
+        self.current_avatar_id = ""
+        self.image_path = ""
+        self.presence = False
+        self.eog_process = None
+        self.ffplay_process = None
+
+        # AI face mode — active by default on idle
+        self.ai_active = True
+
         self.subscription = self.create_subscription(
             JointState,
             '/operator/face/expressions',
@@ -164,7 +187,31 @@ class ROS2Subscriber(Node):
             1
         )
 
+        self.ai_mouth_subscription = self.create_subscription(
+            JointState, '/ai/face/mouth', self.ai_mouth_callback, 1)
+
+        self.ai_active_subscription = self.create_subscription(
+            Bool, '/ai/face/active', self.ai_active_callback, 1)
+
+        # Avatar list for the operator app: /robody/{robot}/avatar/list and the
+        # matching reply/request topics. Attached to this node so it is spun by
+        # the viewer's render loop together with everything else.
+        try:
+            self.avatar_list = AvatarListInterface(
+                node=self,
+                avatar_root=AVATAR_PATH,
+                legacy_name_map=NAME_MAP,
+                thumbnail_renderer=getattr(viewer, 'render_avatar_thumbnail', None),
+            )
+        except Exception as exc:
+            self.avatar_list = None
+            self.get_logger().error(f"Avatar list unavailable: {exc}")
+
         # self.create_timer(1/8.0, self.timer_callback)
+
+        # Start AI face by default on idle (idle video still available via show_idle_video)
+        self.viewer.audio_mouth_driver.start()
+        self.viewer.need_update = True
 
     def timer_callback(self):
 
@@ -175,16 +222,139 @@ class ROS2Subscriber(Node):
             self.viewer.update_blendshapes_from_ros(self.blendshape_data)
 
     def presence_callback(self, msg):
-        # self.get_logger().info(f"Presence msg arrived: {msg.data}")
-        self.viewer.splatting_visible = msg.data
-        # self.viewer.toggle_splatting(msg.data)
+        self.presence = msg.data
+
+        if not msg.data:
+            # Return to AI face on idle
+            self.ai_active = True
+            self.viewer.splatting_visible = False
+            self.hide_image()
+            self.viewer.audio_mouth_driver.start()
+            self.viewer.need_update = True
+            self.hide_idle_video()
+            self.publish_active_avatar()
+            return
+
+        # Presence is True — switch to human avatar if a valid name is set
+        self.hide_idle_video()
+        avatar_value, self.current_avatar_id = self.resolve_avatar(self.current_name)
+        if avatar_value is not None and avatar_value != 'ai':
+            if self.ai_active:
+                self.ai_active = False
+                self.viewer.audio_mouth_driver.stop()
+            if avatar_value.endswith('.png'):
+                self.viewer.splatting_visible = False
+                self.update_image_display()
+            else:
+                self.hide_image()
+                self.viewer.splatting_visible = True
+        else:
+            self.viewer.splatting_visible = False
+
+        self.viewer.need_update = True
+        self.publish_active_avatar()
+
+    def ai_active_callback(self, msg):
+        was_active = self.ai_active
+        self.ai_active = msg.data
+        self.get_logger().info(f"AI face active: {msg.data}")
+        if msg.data and not was_active and not self.presence:
+            self.hide_idle_video()
+            self.viewer.need_update = True
+        elif not msg.data and not self.presence:
+            self.show_idle_video()
+        self.publish_active_avatar()
+
+    def ai_mouth_callback(self, msg):
+        if not self.ai_active or self.presence:
+            return
+        self.blendshape_data.clear()
+        for name, value in zip(msg.name, msg.position):
+            self.blendshape_data[name] = value
+
+    def resolve_avatar(self, name):
+        """(folder name, avatar id) for a string received on /operator/name.
+
+        The avatar list accepts the legacy ids from NAME_MAP as well as the
+        plain folder name of an avatar installed later, so a newly trained
+        avatar is selectable without a code change. NAME_MAP stays as the
+        fallback for the case where the avatar list failed to start.
+        """
+        if self.avatar_list is not None:
+            avatar = self.avatar_list.resolve(name)
+            if avatar is not None:
+                return avatar.target, avatar.id
+        avatar_value = NAME_MAP.get(name)
+        return (avatar_value, name) if avatar_value is not None else (None, "")
+
+    def publish_active_avatar(self):
+        """Tell the operator app which avatar this robot is showing.
+
+        That is the accepted selection from /operator/name -- the node keeps it
+        while nobody is present and renders it the moment presence arrives, and
+        the app uses it to highlight an entry in its picker. With no selection
+        the AI face is what is on screen, so it is reported when the app can
+        select it at all; otherwise the active id is empty.
+        """
+        if self.avatar_list is None:
+            return
+        if self.current_avatar_id:
+            active = self.current_avatar_id
+        elif self.ai_active:
+            active = self.avatar_list.id_for_target('ai')
+        else:
+            active = ""
+        self.avatar_list.set_active(active)
 
     def name_callback(self, msg):
-        if msg.data in NAME_MAP:
-            # self.get_logger().info(f"{NAME_MAP}
-            self.viewer.avatar_path = f"{AVATAR_PATH}/{NAME_MAP[msg.data]}"
+        incoming_name = msg.data.strip().lower()
+        if incoming_name == self.current_name:
+            return
+        self.current_name = incoming_name
+        self.get_logger().info(f"Name callback: {self.current_name}, presence: {self.presence}")
+
+        avatar_value, self.current_avatar_id = self.resolve_avatar(self.current_name)
+        if avatar_value is None:
+            self.get_logger().info(f"Avatar name not found: {self.current_name}")
+            self.publish_active_avatar()
+            return
+
+        self.image_path = f"{AVATAR_PATH}/{avatar_value}"
+        self.get_logger().info(f"Avatar value: {avatar_value}, image_path: {self.image_path}")
+
+        if avatar_value == 'ai':
+            self.ai_active = True
+            self.viewer.splatting_visible = False
+            self.hide_image()
+            self.hide_idle_video()
+            self.viewer.audio_mouth_driver.start()
+            self.viewer.need_update = True
+            self.get_logger().info("AI face mode: audio mouth driver started")
+            self.publish_active_avatar()
+            return
+
+        # Trigger avatar load on name arrival so render loop preloads it
+        if not avatar_value.endswith('.png'):
+            self.viewer.avatar_path = self.image_path
+
+        # Only switch away from AI face if operator is actually present
+        if not self.presence:
+            self.get_logger().info(f"Ignoring name '{self.current_name}' — no presence, keeping AI face")
+            self.publish_active_avatar()
+            return
+
+        # Switching away from AI mode — stop audio driver
+        if self.ai_active:
+            self.ai_active = False
+            self.viewer.audio_mouth_driver.stop()
+
+        if avatar_value.endswith('.png'):
+            self.viewer.splatting_visible = False
+            self.update_image_display()
         else:
-            self.get_logger().info(f"Avatar name not found: {msg.data}")
+            self.hide_image()
+            self.viewer.splatting_visible = self.presence
+        self.publish_active_avatar()
         # self.viewer.unload_avatar()
         # self.viewer.load_avatar(f"{AVATAR_PATH}/{msg.data}")
 
@@ -207,6 +377,70 @@ class ROS2Subscriber(Node):
     def eyes_callback(self, msg):
         self.eyes_data = [msg.pose.orientation.x / 100.0, msg.pose.orientation.y / 100.0]
         # self.get_logger().info(f"Eyes: {self.eyes_data}", throttle_duration_sec=10)
+
+    def update_image_display(self):
+        if self.image_path.endswith('.png') and self.presence:
+            self.show_image(self.image_path)
+        else:
+            self.hide_image()
+
+    def show_image(self, path):
+        if self.eog_process is not None and self.eog_process.poll() is None:
+            return
+        try:
+            env = os.environ.copy()
+            env['DISPLAY'] = ':0'
+            # image_path = os.path.expanduser(f'{AVATAR_PATH}/mark.png')
+            image_path = path
+            self.eog_process = subprocess.Popen(
+                ['eog', '--fullscreen', image_path],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            self.get_logger().info(f'Displaying image: {image_path}')
+        except Exception as e:
+            self.get_logger().error(f'Failed to display image: {e}')
+
+    def hide_image(self):
+        if self.eog_process is not None and self.eog_process.poll() is None:
+            try:
+                self.eog_process.terminate()
+                self.eog_process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.eog_process.kill()
+            except Exception as e:
+                self.get_logger().error(f'Failed to hide image: {e}')
+            finally:
+                self.eog_process = None
+
+    def show_idle_video(self):
+        if self.ffplay_process is not None and self.ffplay_process.poll() is None:
+            return  # already running
+        try:
+            env = os.environ.copy()
+            env['DISPLAY'] = ':0'
+            self.ffplay_process = subprocess.Popen(
+                ['ffplay', '-an', '-vf', 'setpts=7*PTS', '-fs', '-loop', '0', IDLE_VIDEO_PATH],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            self.get_logger().info(f'Playing idle video: {IDLE_VIDEO_PATH}')
+        except Exception as e:
+            self.get_logger().error(f'Failed to play idle video: {e}')
+
+    def hide_idle_video(self):
+        if self.ffplay_process is not None and self.ffplay_process.poll() is None:
+            try:
+                self.ffplay_process.terminate()
+                self.ffplay_process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.ffplay_process.kill()
+            except Exception as e:
+                self.get_logger().error(f'Failed to stop idle video: {e}')
+            finally:
+                self.ffplay_process = None
 
     # def expressions_callback(self, msg):
     #     self.get_logger().info('Received blendshape message:', throttle_duration_sec=1)

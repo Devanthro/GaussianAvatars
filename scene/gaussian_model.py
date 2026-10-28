@@ -331,6 +331,19 @@ class GaussianModel:
                 binding[:, idx] = np.asarray(plydata.elements[0][attr_name])
             self.binding = torch.tensor(binding, dtype=torch.int32, device="cuda").squeeze(-1)
 
+
+        #Remove all gaussians with opacity lower than 0.05 when loading them from file
+        mask = (self.get_opacity > 0.005).squeeze()
+
+        self.binding = self.binding[mask]
+        self._xyz = self._xyz[mask]
+        self._features_dc = self._features_dc[mask]
+        self._features_rest = self._features_rest[mask]
+        self._scaling = self._scaling[mask]
+        self._rotation = self._rotation[mask]
+        self._opacity = self._opacity[mask]
+
+
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:

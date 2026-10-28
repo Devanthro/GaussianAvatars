@@ -215,6 +215,24 @@ class Mini3DViewerConfig:
     """default GUI camera radius from center"""
     fovy: float = 20
     """default GUI camera fovy"""
+    grid_spacing: int = 4
+    """size in screen pixels of one retro "pixel" cell of the overlay mask (0 disables it)"""
+    grid_color: Tuple[float, float, float] = (0., 0., 0.)
+    """color of the gaps between the cells"""
+    grid_alpha: float = 0.6
+    """opacity of the gaps between the cells"""
+    grid_sharpness: float = 0.6
+    """falloff exponent of each cell: low gives thin crisp gaps, high gives round glowing dots"""
+    vignette_strength: float = 0.6
+    """overlay vignette darkness at the corners (0 disables the vignette)"""
+    vignette_radius: float = 0.7
+    """where the vignette starts, as a fraction of the way from the center to the screen edge"""
+    vignette_end: float = 1.0
+    """where the vignette reaches full strength, same scale as vignette_radius (1 is the screen edge)"""
+    vignette_scale_y: float = 1.0
+    """vertical reach of the vignette: below 1 keeps the top and bottom lighter than the sides"""
+    vignette_shape: float = 4.0
+    """roundness of the vignette: 2 is an ellipse, higher is a squarer CRT tube with rounded corners"""
 
 class Mini3DViewer:
     def __init__(self, cfg: Mini3DViewerConfig, title='Mini3DViewer'):
@@ -258,6 +276,9 @@ class Mini3DViewer:
         dpg.create_viewport(title=title, width=self.W, height=self.H, resizable=True, always_on_top=True)
         dpg.setup_dearpygui()
         dpg.show_viewport()
+        self.add_overlay()
+        # Cover the robot's screen: fullscreen on the primary monitor, no title bar.
+        dpg.toggle_viewport_fullscreen()
 
         # self.make_window_override_redirect()
 
@@ -265,6 +286,51 @@ class Mini3DViewer:
     def __del__(self):
         dpg.destroy_context()
     
+    def add_overlay(self):
+        """Retro pixel mask and vignette, drawn as one RGBA texture over the whole viewport.
+
+        It sits on a front viewport drawlist, so it covers every render path
+        (Gaussian avatar, AI face, empty frame) without touching their pixels.
+        """
+        for tag in ("_overlay", "_overlay_texture"):
+            if dpg.does_item_exist(tag):
+                dpg.delete_item(tag)
+        W, H, cfg = self.W, self.H, self.cfg
+        if cfg.grid_spacing <= 0 and cfg.vignette_strength <= 0:
+            return
+
+        alpha = np.zeros((H, W), dtype=np.float32)
+        ys = np.arange(H, dtype=np.float32)[:, None]
+        xs = np.arange(W, dtype=np.float32)[None, :]
+
+        if cfg.grid_spacing > 0:
+            # Position inside each cell, sampled at pixel centers, mapped to (0, 1).
+            n = cfg.grid_spacing
+            u = ((xs % n) + 0.5) / n
+            v = ((ys % n) + 0.5) / n
+            # 1 in the middle of a cell, falling to 0 at its border: a lit "pixel".
+            dot = (np.sin(np.pi * u) * np.sin(np.pi * v)) ** cfg.grid_sharpness
+            alpha = cfg.grid_alpha * (1.0 - dot)
+
+        if cfg.vignette_strength > 0:
+            # Superellipse distance: 1 at the middle of each screen edge, above 1 toward the corners.
+            p = max(cfg.vignette_shape, 1.0)
+            nx = np.abs((xs - (W - 1) / 2) / (W / 2))
+            ny = np.abs((ys - (H - 1) / 2) / (H / 2)) * cfg.vignette_scale_y
+            d = (nx ** p + ny ** p) ** (1.0 / p)
+            t = np.clip((d - cfg.vignette_radius) / max(1e-6, cfg.vignette_end - cfg.vignette_radius), 0, 1)
+            vig = cfg.vignette_strength * t * t * (3 - 2 * t)  # smoothstep
+            # Stack both darkenings: the result lets through what each one lets through.
+            alpha = 1.0 - (1.0 - alpha) * (1.0 - vig)
+
+        self.overlay_buffer = np.zeros((H, W, 4), dtype=np.float32)
+        self.overlay_buffer[..., :3] = cfg.grid_color
+        self.overlay_buffer[..., 3] = alpha
+        with dpg.texture_registry(show=False):
+            dpg.add_raw_texture(W, H, self.overlay_buffer, format=dpg.mvFormat_Float_rgba, tag="_overlay_texture")
+        with dpg.viewport_drawlist(front=True, tag="_overlay"):
+            dpg.draw_image("_overlay_texture", (0, 0), (W, H))
+
     def define_gui(self):
         # register texture =================================================================================================
         with dpg.texture_registry(show=False):
@@ -299,6 +365,7 @@ class Mini3DViewer:
                 dpg.add_raw_texture(self.W, self.H, self.render_buffer, format=dpg.mvFormat_Float_rgb, tag="_texture")
             dpg.add_image("_texture", width=self.W, height=self.H, tag="_image", parent="_canvas_window")
             dpg.configure_item("_canvas_window", width=self.W, height=self.H)
+            self.add_overlay()
             self.need_update = True
         
         def callback_mouse_move(sender, app_data):
