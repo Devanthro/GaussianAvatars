@@ -26,13 +26,15 @@ they are there for the robot's screen, not for a 192x192 tile.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import List, Optional, Sequence
 
 import numpy as np
 
-from avatar_registry import DEFAULT_AVATAR_ROOT, THUMBNAIL_FILENAMES, encode_thumbnail
+from avatar_registry import (DEFAULT_AVATAR_ROOT, THUMBNAIL_FILENAMES, check_avatar_folder,
+                             encode_thumbnail)
 
 #: Rendered at this size, then centre-cropped and scaled down to 192x192. Well
 #: above the final size so the downscale does the antialiasing.
@@ -251,6 +253,13 @@ def main(argv=None) -> int:
             failed += 1
             continue
 
+        # The node leaves these out of the list, so they need no thumbnail.
+        reason = check_avatar_folder(folder, args.sh_degree)
+        if reason:
+            print(f"  {folder.name:<20} not an avatar the viewer can load: {reason}")
+            skipped += 1
+            continue
+
         existing = existing_thumbnail(folder)
         if existing is not None and not args.force:
             print(f"  {folder.name:<20} has {existing.name} already (use --force to replace)")
@@ -275,6 +284,10 @@ def main(argv=None) -> int:
             data = encode_thumbnail(image)
             out_path = folder / "thumbnail.jpg"
             out_path.write_bytes(data)
+            # The container runs as root; leave the file to whoever owns the avatar.
+            if os.geteuid() == 0:
+                st = folder.stat()
+                os.chown(out_path, st.st_uid, st.st_gid)
         except Exception as exc:
             print(f"  {folder.name:<20} failed: {exc}")
             failed += 1

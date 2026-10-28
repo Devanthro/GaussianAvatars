@@ -48,17 +48,47 @@ PUBLISH_TICK_S = 0.2
 
 DEFAULT_ROBOT_NAME = "charlie"
 
+#: robody-hal's environment file, written by robody-ta2-deploy (role hal). Its
+#: ``ROBOT_NAME`` is the name robody-hal publishes under, /robody/<ROBOT_NAME>/.
+DEFAULT_HAL_ENV_FILE = "/etc/robody-ta2/hal.env"
+#: Overrides the path of that file, e.g. for tests or a different mount point.
+HAL_ENV_FILE_VAR = "ROBODY_HAL_ENV_FILE"
+
+
+def read_hal_robot_name(path: Optional[os.PathLike | str] = None) -> str:
+    """``ROBOT_NAME`` from robody-hal's env file, or ``""`` if it has none.
+
+    The file is ``KEY=VALUE`` per line with ``#`` comments, as Docker Compose's
+    ``env_file`` reads it.  A missing or unreadable file is not an error here:
+    the caller falls back to the rest of the chain.
+    """
+    path = Path(path or os.environ.get(HAL_ENV_FILE_VAR) or DEFAULT_HAL_ENV_FILE)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    for line in lines:
+        key, sep, value = line.strip().partition("=")
+        if sep and key.strip() == "ROBOT_NAME":
+            return value.strip().strip("'\"").strip()
+    return ""
+
 
 def resolve_robot_name(node=None) -> str:
     """Robot name used in the topic namespace, e.g. ``charlie``.
 
-    Resolution order: ROS parameter ``robot_name`` -> ``ROBOT_NAME`` /
-    ``ROBODY_ROBOT_NAME`` env var -> hostname -> ``DEFAULT_ROBOT_NAME``.
+    Resolution order: ``ROBOT_NAME`` in robody-hal's env file
+    (``/etc/robody-ta2/hal.env``, see :func:`read_hal_robot_name`) -> ROS
+    parameter ``robot_name`` -> ``ROBOT_NAME`` / ``ROBODY_ROBOT_NAME`` /
+    ``ROBODY_NAME`` env var -> hostname -> ``DEFAULT_ROBOT_NAME``.
 
-    TODO(robot): read this from the same config robody-hal uses instead of
-    guessing.  The path and format of that config are not known here -- add a
-    reader for it as the first entry of this chain once they are.
+    robody-hal's file comes first so the avatar list always lives under the
+    same /robody/<robot>/ namespace as the rest of the robot.
     """
+    value = read_hal_robot_name()
+    if value:
+        return value
+
     if node is not None:
         try:
             node.declare_parameter("robot_name", "")

@@ -50,6 +50,90 @@ METADATA_FILENAME = "avatar.json"
 #: Folder name used for the non-splat "AI face" that the node renders itself.
 AI_FACE_TARGET = "ai"
 
+#: Spherical harmonics degree the viewer loads avatars with (``--sh-degree`` in
+#: run.sh). ``GaussianModel.load_ply`` asserts the matching f_rest_* count.
+VIEWER_SH_DEGREE = 0
+#: Properties ``GaussianModel.load_ply`` reads from the first PLY element.
+PLY_REQUIRED_PROPERTIES = ("x", "y", "z", "opacity", "f_dc_0", "f_dc_1", "f_dc_2")
+#: Property families it reads by prefix; ``binding`` is optional there, but the
+#: load crashes on ``self.binding[mask]`` without it.
+PLY_REQUIRED_PREFIXES = ("scale_", "rot", "binding")
+#: Arrays ``FlameGaussianModel.load_ply`` takes from the avatar's .npz, which the
+#: viewer passes as both the fine-tuned FLAME parameters and the motion.
+FLAME_PARAM_KEYS = ("shape", "static_offset", "translation", "rotation", "neck_pose",
+                    "jaw_pose", "eyes_pose", "expr", "dynamic_offset")
+#: Upper bound for a PLY header; a real one is a few hundred bytes.
+PLY_HEADER_MAX_BYTES = 1 << 20
+
+
+def read_ply_header(path: Path) -> List[Tuple[str, List[str]]]:
+    """``[(element name, [property names])]`` from a PLY header, data unread."""
+    elements: List[Tuple[str, List[str]]] = []
+    with open(path, "rb") as handle:
+        if handle.readline().strip() != b"ply":
+            raise ValueError("not a PLY file")
+        read = 0
+        while True:
+            line = handle.readline()
+            read += len(line)
+            if not line or read > PLY_HEADER_MAX_BYTES:
+                raise ValueError("PLY header has no end_header")
+            words = line.decode("ascii", "replace").split()
+            if not words:
+                continue
+            if words[0] == "end_header":
+                return elements
+            if words[0] == "element" and len(words) >= 2:
+                elements.append((words[1], []))
+            elif words[0] == "property" and elements:
+                elements[-1][1].append(words[-1])
+
+
+def check_avatar_folder(folder: Path, sh_degree: int = VIEWER_SH_DEGREE) -> Optional[str]:
+    """Why the viewer could not load this folder as an avatar, or None if it can.
+
+    Mirrors what ``LocalViewer.load_avatar`` and ``load_ply`` need, from the
+    PLY header and the .npz's table of contents only, so it is cheap enough
+    to run on every scan.  The viewer takes whichever .ply and .npz it finds
+    first, so every one in the folder has to pass.
+    """
+    import zipfile
+
+    ply_files = sorted(folder.glob("*.ply"))
+    if not ply_files:
+        return "no .ply"
+    n_rest = 3 * (sh_degree + 1) ** 2 - 3
+    for ply in ply_files:
+        try:
+            elements = read_ply_header(ply)
+        except (OSError, ValueError) as exc:
+            return f"{ply.name}: {exc}"
+        if not elements or elements[0][0] != "vertex":
+            first = elements[0][0] if elements else "none"
+            return f"{ply.name}: first element is '{first}', not 'vertex'"
+        props = elements[0][1]
+        missing = [p for p in PLY_REQUIRED_PROPERTIES if p not in props]
+        missing += [p + "*" for p in PLY_REQUIRED_PREFIXES if not any(q.startswith(p) for q in props)]
+        if missing:
+            return f"{ply.name}: missing {', '.join(missing)}"
+        rest = sum(1 for p in props if p.startswith("f_rest_"))
+        if rest != n_rest:
+            return f"{ply.name}: {rest} f_rest_* properties, the viewer expects {n_rest}"
+
+    npz_files = sorted(folder.glob("*.npz"))
+    if not npz_files:
+        return "no flame_param.npz"
+    for npz in npz_files:
+        try:
+            with zipfile.ZipFile(npz) as archive:
+                keys = {name[:-4] for name in archive.namelist() if name.endswith(".npy")}
+        except (OSError, zipfile.BadZipFile) as exc:
+            return f"{npz.name}: {exc}"
+        missing = [k for k in FLAME_PARAM_KEYS if k not in keys]
+        if missing:
+            return f"{npz.name}: missing {', '.join(missing)}"
+    return None
+
 #: Legacy ids the operator app has been sending since before this list existed.
 #: ``NAME_MAP`` in ``ros2_blendshape_node.py`` is the single source of truth; it
 #: is injected into the registry so the two can never drift apart.
@@ -210,6 +294,9 @@ class AvatarRegistry:
         self._active = ""
         self._payload = ""
         self._file_cache: Dict[Tuple[str, int, int], bytes] = {}
+        # folder name -> why it is left out, so each reason is logged once
+        # instead of on every rescan.
+        self._rejected: Dict[str, str] = {}
         self.last_scan_time = 0.0
 
     # -- public state ------------------------------------------------------ #
@@ -290,16 +377,20 @@ class AvatarRegistry:
         avatars: List[Avatar] = []
         seen_targets: set = set()
 
+        rejected: Dict[str, str] = {}
         for folder in self._candidate_folders():
             try:
                 avatar = self._build_avatar(folder)
             except Exception as exc:  # a broken avatar must not kill the list
-                self.logger.warning(f"[avatar-list] skipping '{folder.name}': {exc}")
+                rejected[folder.name] = str(exc)
+                if self._rejected.get(folder.name) != str(exc):
+                    self.logger.warning(f"[avatar-list] skipping '{folder.name}': {exc}")
                 continue
             if avatar is None:
                 continue
             avatars.append(avatar)
             seen_targets.add(avatar.target)
+        self._rejected = rejected
 
         # The AI face is rendered by the node itself, so it has no folder of its
         # own on most robots -- keep offering it as long as a legacy id maps to
@@ -346,6 +437,11 @@ class AvatarRegistry:
         if not any(folder.glob("*.ply")):
             self.logger.debug(f"[avatar-list] '{folder.name}' has no .ply, not an avatar")
             return None
+        # A .ply alone is not enough: offering a folder the viewer then fails
+        # to load would leave the operator with a broken face.
+        reason = check_avatar_folder(folder)
+        if reason:
+            raise ValueError(f"not loadable by the viewer: {reason}")
 
         target = folder.name
         ids = self._ids_for_target(target)
