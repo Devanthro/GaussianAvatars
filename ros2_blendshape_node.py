@@ -73,16 +73,13 @@ OVR_ARKIT_BLENDSHAPES_MAP = {
 #: their folder name, which the avatar list hands to the app (see
 #: ``avatar_registry.py``), so a newly trained avatar needs no code change here.
 NAME_MAP = {
-    #"raf": "rafael3",
-    #"raf": "kilian_2",
-    "raf":"flo",
-    #"alona": "alona5",
-    "alona": "lia_mmdm",
+    "raf": "rafael3",
+    "alona": "alona5",
     "caya": "ai",
-    "female": "mubera_caritas",
-    "male": "kilian_mmdm",
-    "johannes": "flo",
-    "juri": "kilian_3",
+    "female": "lia",
+    "male": "mark1",
+    "johannes": "hannes",
+    "juri": "kilian",
     "ai": "ai"
 }
 
