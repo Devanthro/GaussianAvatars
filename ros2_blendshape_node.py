@@ -8,6 +8,8 @@ import traceback
 import subprocess
 import os
 
+from ros2_avatar_list import AvatarListInterface
+
 AVATAR_PATH = "/workspace/avatars/"
 IDLE_VIDEO_PATH = os.path.expanduser("/workspace/avatars/robody-sleeping.mov")
 
@@ -66,14 +68,21 @@ OVR_ARKIT_BLENDSHAPES_MAP = {
     "138": ("mouthStretch_R", 1.5)
 }
 
+#: Legacy ids the operator app has been sending since before the avatar list
+#: existed. They keep working unchanged; avatars added later are addressed by
+#: their folder name, which the avatar list hands to the app (see
+#: ``avatar_registry.py``), so a newly trained avatar needs no code change here.
 NAME_MAP = {
-    "raf": "rafael3",
-    "alona": "alona5",
+    #"raf": "rafael3",
+    #"raf": "kilian_2",
+    "raf":"flo",
+    #"alona": "alona5",
+    "alona": "lia_mmdm",
     "caya": "ai",
-    "female": "lia",
-    "male": "mark1",
-    "johannes": "hannes",
-    "juri": "kilian",
+    "female": "mubera_caritas",
+    "male": "kilian_mmdm",
+    "johannes": "flo",
+    "juri": "kilian_3",
     "ai": "ai"
 }
 
@@ -145,6 +154,7 @@ class ROS2Subscriber(Node):
 
         # Image display state
         self.current_name = None
+        self.current_avatar_id = ""
         self.image_path = ""
         self.presence = False
         self.eog_process = None
@@ -186,6 +196,20 @@ class ROS2Subscriber(Node):
         self.ai_active_subscription = self.create_subscription(
             Bool, '/ai/face/active', self.ai_active_callback, 1)
 
+        # Avatar list for the operator app: /robody/{robot}/avatar/list and the
+        # matching reply/request topics. Attached to this node so it is spun by
+        # the viewer's render loop together with everything else.
+        try:
+            self.avatar_list = AvatarListInterface(
+                node=self,
+                avatar_root=AVATAR_PATH,
+                legacy_name_map=NAME_MAP,
+                thumbnail_renderer=getattr(viewer, 'render_avatar_thumbnail', None),
+            )
+        except Exception as exc:
+            self.avatar_list = None
+            self.get_logger().error(f"Avatar list unavailable: {exc}")
+
         # self.create_timer(1/8.0, self.timer_callback)
 
         # Start AI face by default on idle (idle video still available via show_idle_video)
@@ -211,11 +235,12 @@ class ROS2Subscriber(Node):
             self.viewer.audio_mouth_driver.start()
             self.viewer.need_update = True
             self.hide_idle_video()
+            self.publish_active_avatar()
             return
 
         # Presence is True — switch to human avatar if a valid name is set
         self.hide_idle_video()
-        avatar_value = NAME_MAP.get(self.current_name)
+        avatar_value, self.current_avatar_id = self.resolve_avatar(self.current_name)
         if avatar_value is not None and avatar_value != 'ai':
             if self.ai_active:
                 self.ai_active = False
@@ -230,6 +255,7 @@ class ROS2Subscriber(Node):
             self.viewer.splatting_visible = False
 
         self.viewer.need_update = True
+        self.publish_active_avatar()
 
     def ai_active_callback(self, msg):
         was_active = self.ai_active
@@ -240,6 +266,7 @@ class ROS2Subscriber(Node):
             self.viewer.need_update = True
         elif not msg.data and not self.presence:
             self.show_idle_video()
+        self.publish_active_avatar()
 
     def ai_mouth_callback(self, msg):
         if not self.ai_active or self.presence:
@@ -248,6 +275,40 @@ class ROS2Subscriber(Node):
         for name, value in zip(msg.name, msg.position):
             self.blendshape_data[name] = value
 
+    def resolve_avatar(self, name):
+        """(folder name, avatar id) for a string received on /operator/name.
+
+        The avatar list accepts the legacy ids from NAME_MAP as well as the
+        plain folder name of an avatar installed later, so a newly trained
+        avatar is selectable without a code change. NAME_MAP stays as the
+        fallback for the case where the avatar list failed to start.
+        """
+        if self.avatar_list is not None:
+            avatar = self.avatar_list.resolve(name)
+            if avatar is not None:
+                return avatar.target, avatar.id
+        avatar_value = NAME_MAP.get(name)
+        return (avatar_value, name) if avatar_value is not None else (None, "")
+
+    def publish_active_avatar(self):
+        """Tell the operator app which avatar this robot is showing.
+
+        That is the accepted selection from /operator/name -- the node keeps it
+        while nobody is present and renders it the moment presence arrives, and
+        the app uses it to highlight an entry in its picker. With no selection
+        the AI face is what is on screen, so it is reported when the app can
+        select it at all; otherwise the active id is empty.
+        """
+        if self.avatar_list is None:
+            return
+        if self.current_avatar_id:
+            active = self.current_avatar_id
+        elif self.ai_active:
+            active = self.avatar_list.id_for_target('ai')
+        else:
+            active = ""
+        self.avatar_list.set_active(active)
+
     def name_callback(self, msg):
         incoming_name = msg.data.strip().lower()
         if incoming_name == self.current_name:
@@ -255,11 +316,12 @@ class ROS2Subscriber(Node):
         self.current_name = incoming_name
         self.get_logger().info(f"Name callback: {self.current_name}, presence: {self.presence}")
 
-        if self.current_name not in NAME_MAP:
+        avatar_value, self.current_avatar_id = self.resolve_avatar(self.current_name)
+        if avatar_value is None:
             self.get_logger().info(f"Avatar name not found: {self.current_name}")
+            self.publish_active_avatar()
             return
 
-        avatar_value = NAME_MAP[self.current_name]
         self.image_path = f"{AVATAR_PATH}/{avatar_value}"
         self.get_logger().info(f"Avatar value: {avatar_value}, image_path: {self.image_path}")
 
@@ -271,6 +333,7 @@ class ROS2Subscriber(Node):
             self.viewer.audio_mouth_driver.start()
             self.viewer.need_update = True
             self.get_logger().info("AI face mode: audio mouth driver started")
+            self.publish_active_avatar()
             return
 
         # Trigger avatar load on name arrival so render loop preloads it
@@ -280,6 +343,7 @@ class ROS2Subscriber(Node):
         # Only switch away from AI face if operator is actually present
         if not self.presence:
             self.get_logger().info(f"Ignoring name '{self.current_name}' — no presence, keeping AI face")
+            self.publish_active_avatar()
             return
 
         # Switching away from AI mode — stop audio driver
@@ -293,6 +357,7 @@ class ROS2Subscriber(Node):
         else:
             self.hide_image()
             self.viewer.splatting_visible = self.presence
+        self.publish_active_avatar()
         # self.viewer.unload_avatar()
         # self.viewer.load_avatar(f"{AVATAR_PATH}/{msg.data}")
 
